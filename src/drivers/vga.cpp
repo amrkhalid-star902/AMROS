@@ -1,0 +1,147 @@
+#include <G:\MyOS\include\drivers\vga.h>
+
+using namespace myos::common;
+using namespace myos::drivers;
+
+VideoGraphicsArray::VideoGraphicsArray():
+miscPort(0x3C2),
+crtcIndexPort(0x3D4),
+crtcDataPort(0x3D5),
+sequencerIndexPort(0x3C4),
+sequencerDataPort(0x3C5),
+graphicsControllerIndexPort(0x3CE),
+graphicsControllerDataPort(0x3CF),
+attributeControllerIndexPort(0x3C0),
+attributeControllerReadPort(0x3C1),
+attributeControllerWritePort(0x3C0),
+attributeCOntrollerResetPort(0x3DA)
+{
+
+
+}
+
+VideoGraphicsArray::~VideoGraphicsArray(){
+
+}
+
+void VideoGraphicsArray::WriteRegisters(uint8_t* registers){
+    // misc
+    miscPort.Write(*(registers++));
+    //sequencer
+    for(uint8_t i=0;i<5;i++){
+        sequencerIndexPort.Write(i);
+        sequencerDataPort.Write(*(registers++));
+    }
+    // Cathode ray tube controller
+    //Security feature to protect Cathode Ray tube from blowing up
+    crtcIndexPort.Write(0x03); //Unlock the port
+    crtcDataPort.Write(crtcDataPort.Read()|0x80); // We get the old value and set the first bit to 1 then write it back
+    crtcIndexPort.Write(0x11); //Unlock the port
+    crtcDataPort.Write(crtcDataPort.Read()& ~0x80); // We get the old value and set the first bit to 0 then write it back 
+    // registers 0-7 of port 0x3D4 are write protected by the protect bit(bit 7 0f index 0x11)
+    //so we must clear it to write to these registers
+    registers[0x03]=registers[0x03]|0x80;
+    registers[0x11]=registers[0x11]&~0x80;
+
+    for(uint8_t i=0;i<25; i++){
+        crtcIndexPort.Write(i);
+        crtcDataPort.Write(*(registers++));
+    }
+
+    // Graphics COntroller
+    for(uint8_t i=0;i<9;i++){
+        graphicsControllerIndexPort.Write(i);
+        graphicsControllerDataPort.Write(*(registers++));
+
+    }
+
+    // Attribute Controller
+    for(uint8_t i=0;i<21;i++){
+        //Index and Write port have the same address(0x3C0)
+        //So to tell the port that you are going to write index
+        //ResetPort must be read first 
+        attributeCOntrollerResetPort.Read();
+        attributeControllerIndexPort.Write(i);
+        attributeControllerWritePort.Write(*(registers++));
+    }
+
+    attributeCOntrollerResetPort.Read();
+    attributeControllerIndexPort.Write(0x20);
+
+
+}
+
+bool VideoGraphicsArray::SupportsMode(uint32_t width , uint32_t height ,uint32_t colordepth){
+    //The mode that is supported is 320x200 pixel and 8 bit color depth
+    return width==320 && height==200 && colordepth==8;
+}
+
+bool VideoGraphicsArray::SetMode(uint32_t width , uint32_t height ,uint32_t colordepth){
+    if(!SupportsMode(width,height,colordepth))
+        return false;
+
+    unsigned char g_320x200x256[]=
+    {
+        /*MISC*/
+        0x63,
+        /*SEQ*/
+        0x03,0x01,0x0F,0x00,0x0E,
+        /*CRTC */
+        0x5F,0x4F,0x50,0x82,0x54,0x80,0xBF,0x1F,
+        0x00,0x41,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x9C,0x0E,0x8F,0x28,0x40,0x96,0xB9,0xA3,
+        0xFF,
+        /*GraphicController*/
+        0x00,0x00,0x00,0x00,0x00,0x40,0x05,0x0F, 
+        0xFF,
+
+        /*ArrtibuteController */
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+        0x41,0x00,0x0F,0x00,0x00 
+    };
+
+    WriteRegisters(g_320x200x256);
+    return true;
+}
+
+
+uint8_t* VideoGraphicsArray::GetFrameBufferSegment(){
+    graphicsControllerIndexPort.Write(0x06);
+    uint8_t segmentNumber=(graphicsControllerDataPort.Read() >>2)&0x03;
+    //It chooses which memory plane Read or write will be form in it from the bit 2 and 3
+    switch(segmentNumber){
+        default:
+        case 0: return (uint8_t*)0x00000;
+        case 1: return (uint8_t*)0xA0000;
+        case 2: return (uint8_t*)0xB0000;
+        case 3: return (uint8_t*)0xB8000;
+        }
+    }
+
+    void VideoGraphicsArray::PutPixel(int32_t x, int32_t y , uint8_t colorIndex){
+    if(x<0 || x>=320 || y<0 || y>=200)
+        return;
+    uint8_t* pixelAddress=GetFrameBufferSegment()+320*y+x;
+    *pixelAddress=colorIndex; 
+}
+
+uint8_t VideoGraphicsArray::GetColorIndex(uint8_t r , uint8_t g ,uint8_t b){
+
+    if(r==0x00 && g==0x00 && b==0x00) return 0x00; //black
+    if(r==0x00 && g==0x00 && b==0xA8) return 0x01; //blue
+    if(r==0x00 && g==0xA8 && b==0x00) return 0x02;//green
+    if(r==0xA8 && g==0x00 && b==0x00) return 0x04;//red
+    if(r==0xFF && g==0xFF && b==0xFF) return 0x3F;//white
+    return 0x00;
+}
+
+void VideoGraphicsArray::PutPixel(int32_t x , int32_t y , uint8_t r , uint8_t g , uint8_t b){
+    PutPixel(x,y,GetColorIndex(r,g,b));
+}
+
+void VideoGraphicsArray::FillRectangle(myos::common::uint32_t x , myos::common::uint32_t y ,myos::common::uint32_t w ,myos::common::uint32_t h ,myos::common::uint8_t r ,myos::common::uint8_t g , myos::common::uint8_t b){
+    for(int32_t Y=y; Y< y+h; Y++)
+        for(int32_t X=x; X <x+w; X++)
+            PutPixel(X,Y,r,g,b);
+}
